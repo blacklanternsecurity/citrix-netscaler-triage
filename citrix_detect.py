@@ -481,6 +481,7 @@ class CitrixDetector:
         self.gzip_version: str | None = None  # highest-confidence version
         self.gzip_stamp: int | None = None  # raw GZIP MTIME even if not in DB
         self.gzip_date: str | None = None  # formatted date of GZIP MTIME
+        self._connect_failures = 0  # track consecutive connection failures
 
     # ------------------------------------------------------------------
     # Helpers
@@ -488,11 +489,23 @@ class CitrixDetector:
     def _get(self, path: str, stream: bool = False) -> requests.Response | None:
         url = f"{self.target}{path}"
         try:
-            return self.session.get(url, timeout=self.timeout,
+            resp = self.session.get(url, timeout=self.timeout,
                                     allow_redirects=True, stream=stream)
-        except requests.RequestException as exc:
+            self._connect_failures = 0  # reset on success
+            return resp
+        except (requests.exceptions.ConnectTimeout,
+                requests.exceptions.ConnectionError) as exc:
             self._debug(f"  [-] {path}: connection error ({type(exc).__name__})")
+            self._connect_failures += 1
             return None
+        except requests.RequestException as exc:
+            self._debug(f"  [-] {path}: request error ({type(exc).__name__})")
+            return None
+
+    @property
+    def _host_unreachable(self) -> bool:
+        """True if the host appears unreachable (2+ consecutive connect failures)."""
+        return self._connect_failures >= 2
 
     @staticmethod
     def _log(msg: str):
@@ -532,10 +545,16 @@ class CitrixDetector:
         try:
             resp = self.session.get(url, timeout=self.timeout, allow_redirects=True,
                                     stream=True)
-        except requests.RequestException as exc:
+        except (requests.exceptions.ConnectTimeout,
+                requests.exceptions.ConnectionError) as exc:
             self._debug(f"  [-] {path}: connection error ({type(exc).__name__})")
+            self._connect_failures += 1
+            return
+        except requests.RequestException as exc:
+            self._debug(f"  [-] {path}: request error ({type(exc).__name__})")
             return
 
+        self._connect_failures = 0
         if resp.status_code != 200:
             self._debug(f"  [-] {path} -> HTTP {resp.status_code}")
             return
@@ -1023,6 +1042,11 @@ class CitrixDetector:
                 if any(p in final_url for p in ["/logon/", "/vpn/", "/cgi/"]):
                     self.is_citrix = True
                     self._add_finding("Redirect", f"Root redirects to {final_url}")
+
+        # Bail out early if host is unreachable
+        if self._host_unreachable and not self.is_citrix:
+            self._log(f"  {self.target} -> Host unreachable (connection timed out)\n")
+            return
 
         # --- Phase 3: Probe known endpoints ---
         self._debug("\n[*] Phase 3: Probing known Citrix endpoints...")
