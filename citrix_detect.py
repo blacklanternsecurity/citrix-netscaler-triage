@@ -461,10 +461,11 @@ PROBE_ENDPOINTS = OrderedDict([
 
 class CitrixDetector:
     def __init__(self, target: str, timeout: int = 10, user_agent: str | None = None,
-                 check_cves: bool = False):
+                 check_cves: bool = False, debug: bool = False):
         self.target = target.rstrip("/")
         self.timeout = timeout
         self.check_cves = check_cves
+        self.debug_mode = debug
         self.session = requests.Session()
         self.session.verify = False
         self.session.headers["User-Agent"] = user_agent or (
@@ -488,12 +489,16 @@ class CitrixDetector:
             return self.session.get(url, timeout=self.timeout,
                                     allow_redirects=True, stream=stream)
         except requests.RequestException as exc:
-            self._log(f"  [-] {path}: connection error ({type(exc).__name__})")
+            self._debug(f"  [-] {path}: connection error ({type(exc).__name__})")
             return None
 
     @staticmethod
     def _log(msg: str):
         print(msg)
+
+    def _debug(self, msg: str):
+        if self.debug_mode:
+            print(msg)
 
     def _add_finding(self, source: str, detail: str, version: str | None = None):
         finding = {"source": source, "detail": detail, "version": version}
@@ -526,27 +531,27 @@ class CitrixDetector:
             resp = self.session.get(url, timeout=self.timeout, allow_redirects=True,
                                     stream=True)
         except requests.RequestException as exc:
-            self._log(f"  [-] {path}: connection error ({type(exc).__name__})")
+            self._debug(f"  [-] {path}: connection error ({type(exc).__name__})")
             return
 
         if resp.status_code != 200:
-            self._log(f"  [-] {path} -> HTTP {resp.status_code}")
+            self._debug(f"  [-] {path} -> HTTP {resp.status_code}")
             return
 
         # Read raw undecoded bytes — bypasses Content-Encoding decompression
         data = resp.raw.read(decode_content=False)
         if len(data) < 16:
-            self._log(f"  [-] {path} -> response too small ({len(data)} bytes)")
+            self._debug(f"  [-] {path} -> response too small ({len(data)} bytes)")
             return
 
         # Validate GZIP header: magic + deflate + FNAME flag
         if not data.startswith(b"\x1f\x8b\x08\x08"):
-            self._log(f"  [-] {path} -> not a valid GZIP with FNAME field")
+            self._debug(f"  [-] {path} -> not a valid GZIP with FNAME field")
             return
 
         # Verify original filename is rdx_en.json
         if b"rdx_en.json" not in data[:100]:
-            self._log(f"  [-] {path} -> GZIP filename mismatch")
+            self._debug(f"  [-] {path} -> GZIP filename mismatch")
             return
 
         self.is_citrix = True
@@ -569,19 +574,19 @@ class CitrixDetector:
                 f"MTIME={stamp} ({dt_str}) -> {version}",
                 version,
             )
-            self._log(f"  [+] {path} -> GZIP MTIME fingerprint: {version} ({dt_str})")
+            self._debug(f"  [+] {path} -> GZIP MTIME fingerprint: {version} ({dt_str})")
         elif version == "unknown":
             self._add_finding(
                 "GZIP timestamp (rdx_en.json.gz)",
                 f"MTIME={stamp} ({dt_str}) -> timestamp in DB but version unknown",
             )
-            self._log(f"  [~] {path} -> known timestamp but unmapped version ({dt_str})")
+            self._debug(f"  [~] {path} -> known timestamp but unmapped version ({dt_str})")
         else:
             self._add_finding(
                 "GZIP timestamp (rdx_en.json.gz)",
                 f"MTIME={stamp} ({dt_str}) -> not in fingerprint database",
             )
-            self._log(f"  [~] {path} -> GZIP timestamp not in DB ({dt_str}, stamp={stamp})")
+            self._debug(f"  [~] {path} -> GZIP timestamp not in DB ({dt_str}, stamp={stamp})")
 
         # Also try vhash (MD5 of full response body)
         md5 = hashlib.md5(data).hexdigest()
@@ -592,7 +597,7 @@ class CitrixDetector:
                 f"MD5={md5} -> {vhash_version}",
                 vhash_version,
             )
-            self._log(f"  [+] {path} -> vhash MD5 match: {vhash_version}")
+            self._debug(f"  [+] {path} -> vhash MD5 match: {vhash_version}")
             if not self.gzip_version:
                 self.gzip_version = vhash_version
 
@@ -707,7 +712,7 @@ class CitrixDetector:
                     f"?v={vhash} -> {version}",
                     version,
                 )
-                self._log(f"  [+] {path} -> vhash match in HTML: {version}")
+                self._debug(f"  [+] {path} -> vhash match in HTML: {version}")
                 if not self.gzip_version:
                     self.gzip_version = version
                 return  # one match is enough
@@ -763,7 +768,7 @@ class CitrixDetector:
                 continue
 
             self.is_citrix = True
-            self._log(f"  [+] {path} -> EPA binary accessible ({total_size} bytes)")
+            self._debug(f"  [+] {path} -> EPA binary accessible ({total_size} bytes)")
 
             # Search chunks of the PE for Citrix version info.
             # NSIS installers have the real version info in the first ~2MB
@@ -856,7 +861,7 @@ class CitrixDetector:
                     if prod_name:
                         detail += f" ({prod_name})"
                     self._add_finding(f"EPA binary ({path})", detail, ver_str)
-                    self._log(f"  [+] {path} -> {detail}")
+                    self._debug(f"  [+] {path} -> {detail}")
                     return True
 
         return False
@@ -912,7 +917,7 @@ class CitrixDetector:
                     f"Favicon ({path})",
                     f"MD5={md5} ({size} bytes) -> {product}",
                 )
-                self._log(f"  [+] {path} -> favicon match: {product} (MD5={md5})")
+                self._debug(f"  [+] {path} -> favicon match: {product} (MD5={md5})")
             elif size > 0 and resp.content[:4] == b"\x00\x00\x01\x00":
                 # Valid ICO file but unknown hash — record for future DB building
                 self._add_finding(
@@ -992,19 +997,19 @@ class CitrixDetector:
     # Main scan
     # ------------------------------------------------------------------
     def scan(self):
-        self._log(f"\n{'='*65}")
-        self._log(f" Citrix NetScaler Version Detection")
-        self._log(f" Target: {self.target}")
-        self._log(f" Fingerprint DB: {len(VSTAMP_TO_VERSION)} timestamps,"
+        self._debug(f"\n{'='*65}")
+        self._debug(f" Citrix NetScaler Version Detection")
+        self._debug(f" Target: {self.target}")
+        self._debug(f" Fingerprint DB: {len(VSTAMP_TO_VERSION)} timestamps,"
                    f" {len(VHASH_TO_VERSION)} MD5 hashes")
-        self._log(f"{'='*65}\n")
+        self._debug(f"{'='*65}\n")
 
         # --- Phase 1: GZIP Timestamp Fingerprinting (most reliable) ---
-        self._log("[*] Phase 1: GZIP timestamp fingerprinting (rdx_en.json.gz)...")
+        self._debug("[*] Phase 1: GZIP timestamp fingerprinting (rdx_en.json.gz)...")
         self.check_gzip_fingerprint()
 
         # --- Phase 2: Root URL and headers ---
-        self._log("\n[*] Phase 2: Checking root URL, headers, and redirects...")
+        self._debug("\n[*] Phase 2: Checking root URL, headers, and redirects...")
         root_resp = self._get("/")
         if root_resp is not None:
             self.check_headers(root_resp, "/")
@@ -1018,13 +1023,13 @@ class CitrixDetector:
                     self._add_finding("Redirect", f"Root redirects to {final_url}")
 
         # --- Phase 3: Probe known endpoints ---
-        self._log("\n[*] Phase 3: Probing known Citrix endpoints...")
+        self._debug("\n[*] Phase 3: Probing known Citrix endpoints...")
         for path, description in PROBE_ENDPOINTS.items():
             resp = self._get(path)
             if resp is None:
                 continue
             status = resp.status_code
-            self._log(f"  [{'+'if status == 200 else '-'}] {path} -> HTTP {status}")
+            self._debug(f"  [{'+'if status == 200 else '-'}] {path} -> HTTP {status}")
 
             if status == 200:
                 self.is_citrix = True
@@ -1047,7 +1052,7 @@ class CitrixDetector:
                                   f"{description} -- HTTP 403 (exists but forbidden)")
 
         # --- Phase 4: Build-specific JS resources ---
-        self._log("\n[*] Phase 4: Checking build-specific JS resources...")
+        self._debug("\n[*] Phase 4: Checking build-specific JS resources...")
         build_paths = [
             "/vpn/js/gateway_login_view.js",
             "/vpn/js/gateway_login_form_view.js",
@@ -1059,24 +1064,24 @@ class CitrixDetector:
             resp = self._get(path)
             if resp is None or resp.status_code != 200:
                 continue
-            self._log(f"  [+] {path} -> HTTP 200")
+            self._debug(f"  [+] {path} -> HTTP 200")
             self.is_citrix = True
             self.check_body_versions(resp.text, path)
 
         # --- Phase 5: EPA binary PE version extraction ---
-        self._log("\n[*] Phase 5: Checking EPA binary version metadata...")
+        self._debug("\n[*] Phase 5: Checking EPA binary version metadata...")
         self.check_epa_binary()
 
         # --- Phase 6: Favicon fingerprinting ---
-        self._log("\n[*] Phase 6: Favicon fingerprinting...")
+        self._debug("\n[*] Phase 6: Favicon fingerprinting...")
         self.check_favicon()
 
         # --- Phase 7: Static file content hashing ---
-        self._log("\n[*] Phase 7: Static file content hashing...")
+        self._debug("\n[*] Phase 7: Static file content hashing...")
         self.check_static_file_hashes()
 
         # --- Phase 8: TLS certificate analysis ---
-        self._log("\n[*] Phase 8: TLS certificate analysis...")
+        self._debug("\n[*] Phase 8: TLS certificate analysis...")
         self.check_tls_cert()
 
         self._print_results()
@@ -1103,12 +1108,12 @@ class CitrixDetector:
     # Report
     # ------------------------------------------------------------------
     def _print_results(self):
-        self._log(f"\n{'='*65}")
-        self._log(" RESULTS")
-        self._log(f"{'='*65}\n")
+        self._debug(f"\n{'='*65}")
+        self._debug(" RESULTS")
+        self._debug(f"{'='*65}\n")
 
         if not self.is_citrix:
-            self._log("[!] No Citrix product detected on this target.\n")
+            self._log(f"  {self.target} -> Not detected\n")
             return
 
         # Determine best version (prefer GZIP fingerprint)
@@ -1127,12 +1132,12 @@ class CitrixDetector:
                 best_version = sorted(firmware_versions, key=lambda v: parse_version(v))[-1]
 
         # --- Detailed findings first (verbose, scrolls off screen) ---
-        self._log(f"  Total findings: {len(self.findings)}\n")
-        self._log("  Detailed findings:")
-        self._log(f"  {'-'*55}")
+        self._debug(f"  Total findings: {len(self.findings)}\n")
+        self._debug("  Detailed findings:")
+        self._debug(f"  {'-'*55}")
         for f in self.findings:
             ver = f" [v{f['version']}]" if f["version"] else ""
-            self._log(f"  {f['source']}: {f['detail']}{ver}")
+            self._debug(f"  {f['source']}: {f['detail']}{ver}")
 
         # --- Summary at the bottom (always visible) ---
         self._log(f"\n{'='*65}")
@@ -1247,13 +1252,14 @@ class CitrixDetector:
 # MAIN
 # ═══════════════════════════════════════════════════════════════════════════
 
-def scan_target(target: str, timeout: int, user_agent: str | None, check_cves: bool) -> bool:
+def scan_target(target: str, timeout: int, user_agent: str | None,
+                check_cves: bool, debug: bool = False) -> bool:
     """Scan a single target. Returns True if Citrix detected."""
     if not target.startswith(("http://", "https://")):
         target = f"https://{target}"
 
     detector = CitrixDetector(target, timeout=timeout, user_agent=user_agent,
-                              check_cves=check_cves)
+                              check_cves=check_cves, debug=debug)
     detector.scan()
     return detector.is_citrix
 
@@ -1276,6 +1282,8 @@ def main():
                         help="Custom User-Agent string")
     parser.add_argument("--cve", action="store_true",
                         help="Run CVE vulnerability assessment against detected version")
+    parser.add_argument("-d", "--debug", action="store_true",
+                        help="Show verbose phase-by-phase output and detailed findings")
     args = parser.parse_args()
 
     if not args.target and not args.file:
@@ -1301,7 +1309,7 @@ def main():
         targets.append(args.target)
 
     if len(targets) == 1:
-        detected = scan_target(targets[0], args.timeout, args.user_agent, args.cve)
+        detected = scan_target(targets[0], args.timeout, args.user_agent, args.cve, args.debug)
         sys.exit(0 if detected else 1)
 
     # Multi-target mode
