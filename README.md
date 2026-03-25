@@ -1,11 +1,175 @@
 # Citrix NetScaler Triage
 
-This repository contains triage scripts for Citrix NetScaler devices:
+This repository contains triage and fingerprinting scripts for Citrix NetScaler devices.
 
-* `iocitrix.py` -- a Dissect script to Triage a Citrix NetScaler image/target.
-* `scan-citrix-netscaler-version.py` -- Scan and fingerprint the version of a NetScaler device over HTTP(s).
+> **Fork of [fox-it/citrix-netscaler-triage](https://github.com/fox-it/citrix-netscaler-triage)** with additional detection tools by [Black Lantern Security](https://www.blacklanternsecurity.com/).
+
+## Tools
+
+| Script | Description |
+|--------|-------------|
+| `citrix_detect.py` | **BLS** - Comprehensive version detection using 12 techniques with CVE assessment |
+| `scan-citrix-netscaler-version.py` | Fox-IT - Mass version scanner via GZIP timestamp fingerprinting |
+| `iocitrix.py` | Fox-IT - Dissect-based IOC checker for forensic disk images |
+| `extract-Stamp-From-TgzFile.py` | Fox-IT - Extract fingerprints from Citrix firmware .tgz packages |
+| `nuclei-templates/` | **BLS** - Nuclei templates for detection, version fingerprinting, and CVE checks |
+| `custom-fingerprints.csv` | **BLS** - Tracking file for newly discovered fingerprints |
+
+---
+
+# citrix_detect.py
+
+A comprehensive Citrix NetScaler ADC/Gateway version detection and vulnerability assessment tool. Uses 12 detection techniques across 8 phases to identify and fingerprint NetScaler appliances.
+
+## Detection Techniques
+
+| Phase | Technique | Confidence | Source |
+|-------|-----------|------------|--------|
+| 1 | GZIP timestamp fingerprinting (`rdx_en.json.gz`) | HIGH | fox-it |
+| 1 | MD5 vhash of GZIP file | HIGH | fox-it |
+| 2 | Root URL headers, cookies, redirects | MEDIUM | - |
+| 2 | `Last-Modified` header fingerprinting | MEDIUM | telekom-security |
+| 2 | `Via: NS-CACHE-X.X` header version extraction | MEDIUM | WhatWeb/Nmap |
+| 2 | `Cneonction`/`nnCoection` misspelled header detection | MEDIUM | wafw00f |
+| 3 | Endpoint probing (11 known Citrix paths) | MEDIUM | - |
+| 3 | `?v=<hash>` extraction from `index.html` | HIGH | securekomodo |
+| 3 | EPA plugin version from `pluginlist.xml` | MEDIUM | securekomodo |
+| 4 | Build-specific JavaScript version strings | LOW | - |
+| 5 | EPA binary PE version metadata extraction | HIGH | kolbicz blog |
+| 6 | Favicon MD5 fingerprinting (6 known hashes) | MEDIUM | rapid7/recog |
+| 7 | Static file content hashing (MD5 + size) | MEDIUM | - |
+| 8 | TLS certificate analysis (default Citrix cert, SANs) | MEDIUM | rapid7/recog |
+
+## Fingerprint Database
+
+- **237 GZIP timestamp fingerprints** (NetScaler 11.1 through 14.1, 2018-2025)
+- **132 MD5 vhash fingerprints** for older builds
+- **6 favicon MD5 hashes** from Rapid7 Recog
+- **3 Last-Modified header timestamps** for known patched builds
+
+## CVE Vulnerability Assessment
+
+When run with `--cve`, checks detected versions against 6 CVEs across 3 Citrix advisories:
+
+| CVE | Advisory | Description |
+|-----|----------|-------------|
+| CVE-2025-5349 | CTX693420 | CitrixBleed 2 - memory disclosure |
+| CVE-2025-5777 | CTX693420 | CitrixBleed 2 - memory disclosure |
+| CVE-2025-6543 | CTX694788 | Memory overflow (exploited in-the-wild) |
+| CVE-2025-7775 | CTX694938 | Multiple vulnerabilities |
+| CVE-2025-7776 | CTX694938 | Multiple vulnerabilities |
+| CVE-2025-8424 | CTX694938 | Multiple vulnerabilities |
+
+Includes FIPS/NDcPP build awareness (12.1-55.x and 13.1-37.x) and EOL detection.
+
+## Installing `citrix_detect.py`
+
+```shell
+git clone https://github.com/blacklanternsecurity/citrix-netscaler-triage.git
+cd citrix-netscaler-triage
+pip install requests
+python3 citrix_detect.py --help
+```
+
+## Usage
+
+```shell
+# Basic version detection
+python3 citrix_detect.py https://vpn.example.com
+
+# With CVE vulnerability assessment
+python3 citrix_detect.py --cve https://vpn.example.com
+
+# Custom timeout and user-agent
+python3 citrix_detect.py -t 15 -a "Custom-Agent" --cve https://vpn.example.com
+```
+
+### Example Output
+
+```
+=================================================================
+ SUMMARY
+=================================================================
+
+  Target: https://vpn.example.com
+  [+] Citrix NetScaler DETECTED
+
+  Best version match: 14.1-56.74
+  Confidence: HIGH (GZIP timestamp fingerprint)
+
+  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  CVE VULNERABILITY ASSESSMENT (version 14.1-56.74)
+  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  [ok] CVE-2025-5349: Not affected
+  [ok] CVE-2025-5777: Not affected
+  [ok] CVE-2025-6543: Not affected
+  [ok] CVE-2025-7775: Not affected
+  [ok] CVE-2025-7776: Not affected
+  [ok] CVE-2025-8424: Not affected
+
+  >> No known CVEs affect this version.
+```
+
+When the GZIP timestamp is not in the database, the tool extrapolates from the nearest known version:
+
+```
+  Firmware build date: 2026-01-13 09:52:07 UTC
+  GZIP timestamp: 1768297927 (not in fingerprint DB)
+  Nearest older known version: 12.1-55.333 (63 days older)
+  Likely version: newer than 12.1-55.333
+  Confidence: MEDIUM (timestamp extrapolation)
+```
+
+Exit code is `0` if Citrix is detected, `1` if not.
+
+---
+
+# Nuclei Templates
+
+Three Nuclei templates (v3+) are provided in `nuclei-templates/`:
+
+| Template | Severity | Description |
+|----------|----------|-------------|
+| `citrix-netscaler-detect.yaml` | info | Product detection via multiple HTTP matchers |
+| `citrix-netscaler-version.yaml` | info | Version fingerprinting via `flow: http() && code()` |
+| `citrix-netscaler-cves.yaml` | high | CVE vulnerability assessment with FIPS/EOL awareness |
+
+The version and CVE templates use the `code:` protocol with Python to perform GZIP timestamp extraction, so they require `nuclei` with code protocol support enabled.
+
+## Usage
+
+```shell
+# Detection only
+nuclei -t nuclei-templates/citrix-netscaler-detect.yaml -u https://vpn.example.com
+
+# Version fingerprinting
+nuclei -t nuclei-templates/citrix-netscaler-version.yaml -u https://vpn.example.com
+
+# CVE assessment
+nuclei -t nuclei-templates/citrix-netscaler-cves.yaml -u https://vpn.example.com
+
+# All templates against a target list
+nuclei -t nuclei-templates/ -l targets.txt
+```
+
+---
+
+# Adding New Fingerprints
+
+When `citrix_detect.py` reports a GZIP timestamp not in the database, you can add it:
+
+1. Note the timestamp and vhash from the scan output
+2. Add an entry to `custom-fingerprints.csv` with the source and notes
+3. Add the CSV line to the embedded database in `scan-citrix-netscaler-version.py` (line ~47)
+4. Once the version is identified (via Citrix release notes or firmware analysis), update `unknown` to the real version string
+
+The `extract-Stamp-From-TgzFile.py` utility can also extract fingerprints directly from official Citrix firmware `.tgz` packages downloaded from support.citrix.com.
+
+---
 
 # scan-citrix-netscaler-version.py
+
+*From upstream [fox-it/citrix-netscaler-triage](https://github.com/fox-it/citrix-netscaler-triage)*
 
 You can use this script to scan and determine the version of a Citrix NetScaler device over HTTP(s).
 It will also determine if the NetScaler is vulnerable to specific CVEs based on the version.
@@ -14,14 +178,14 @@ It will also determine if the NetScaler is vulnerable to specific CVEs based on 
 
 Use the following steps if you are using pip:
 
-1. git clone https://github.com/fox-it/citrix-netscaler-triage.git
+1. git clone https://github.com/blacklanternsecurity/citrix-netscaler-triage.git
 2. cd citrix-netscaler-triage
 3. pip install httpx
 4. python3 scan-citrix-netscaler-version.py --help
 
 In case of [uv](https://docs.astral.sh/uv/), you can run the script directly using:
 
-1. uv run https://raw.githubusercontent.com/fox-it/citrix-netscaler-triage/refs/heads/main/scan-citrix-netscaler-version.py
+1. uv run https://raw.githubusercontent.com/blacklanternsecurity/citrix-netscaler-triage/refs/heads/main/scan-citrix-netscaler-version.py
 
 Example usage:
 
@@ -83,6 +247,8 @@ For more options see `--help`.
 
 # iocitrix.py
 
+*From upstream [fox-it/citrix-netscaler-triage](https://github.com/fox-it/citrix-netscaler-triage)*
+
 You can use `iocitrix.py` to check for known Indicators of Compromise on a NetScaler Dissect target. It checks for the following things:
 
 * Known strings used in webshells
@@ -101,11 +267,11 @@ Ensure that you have the latest version of Dissect, support for Citrix NetScaler
 
 Use the following steps:
 
-1. git clone https://github.com/fox-it/citrix-netscaler-triage.git
+1. git clone https://github.com/blacklanternsecurity/citrix-netscaler-triage.git
 2. cd citrix-netscaler-triage
 3. pip install -r requirements.txt
 4. pip install --upgrade --pre dissect.volume dissect.target
- 
+
 Note that step 4 will print the following error, but you can ignore it:
 
 ```
@@ -141,11 +307,11 @@ The following commands can be used on a local linux machine to create disk of yo
 
 #### Create a disk image of the `/dev/da0` disk to your local machine
 
-```shell 
+```shell
 local ~ $ ssh nsroot@<YOUR-NETSCALER-IP> shell dd if=/dev/da0 bs=10M | tail -c +7 | head -c -6 > da0.img
 ```
 
-Do note, that this can take some time to complete. No progess is shown when using `dd`. 
+Do note, that this can take some time to complete. No progess is shown when using `dd`.
 It is adviced to wait until you gain control back over the prompt. This is an indication that `dd` finished.
 
 Also if you don't have `/dev/da0` it's most likely `/dev/ada0`, you can verify using the `mount` or `gpart show` command.
