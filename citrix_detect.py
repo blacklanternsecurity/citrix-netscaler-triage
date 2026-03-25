@@ -479,6 +479,7 @@ class CitrixDetector:
         self.versions_found: set[str] = set()
         self.is_citrix = False
         self.gzip_version: str | None = None  # highest-confidence version
+        self.best_version: str | None = None  # resolved after scan
         self.gzip_stamp: int | None = None  # raw GZIP MTIME even if not in DB
         self.gzip_date: str | None = None  # formatted date of GZIP MTIME
         self._connect_failures = 0  # track consecutive connection failures
@@ -1143,19 +1144,20 @@ class CitrixDetector:
             return
 
         # Determine best version (prefer GZIP fingerprint)
-        best_version = self.gzip_version
+        self.best_version = self.gzip_version
 
         # If no GZIP match, look for NetScaler firmware versions in findings.
         # NetScaler firmware versions contain a dash: "14.1-56.74", "13.1-48.47"
         # Plugin/component versions use only dots: "25.5.1.15", "4.3.4619.0"
-        if not best_version:
+        if not self.best_version:
             firmware_versions = [
                 v for v in self.versions_found
                 if "-" in v and parse_version(v) is not None
                 and parse_version(v).major in range(11, 15)
             ]
             if firmware_versions:
-                best_version = sorted(firmware_versions, key=lambda v: parse_version(v))[-1]
+                self.best_version = sorted(firmware_versions, key=lambda v: parse_version(v))[-1]
+        best_version = self.best_version
 
         # --- Detailed findings first (verbose, scrolls off screen) ---
         self._debug(f"  Total findings: {len(self.findings)}\n")
@@ -1284,8 +1286,9 @@ class ScanTimeout(Exception):
 
 def scan_target(target: str, timeout: int, user_agent: str | None,
                 check_cves: bool, debug: bool = False,
-                max_time: int = 0) -> bool | None:
-    """Scan a single target. Returns True/False, or None on timeout."""
+                max_time: int = 0) -> tuple[bool | None, str | None]:
+    """Scan a single target. Returns (detected, version).
+    detected is True/False/None (None = timeout)."""
     if not target.startswith(("http://", "https://")):
         target = f"https://{target}"
 
@@ -1294,10 +1297,10 @@ def scan_target(target: str, timeout: int, user_agent: str | None,
 
     if max_time <= 0:
         detector.scan()
-        return detector.is_citrix
+        return detector.is_citrix, detector.best_version
 
     # Run scan in a thread with a deadline
-    result = [None]  # mutable container for thread result
+    result = [None]
     exc_info = [None]
 
     def _run():
@@ -1313,10 +1316,10 @@ def scan_target(target: str, timeout: int, user_agent: str | None,
 
     if t.is_alive():
         print(f"  [!] Timed out after {max_time}s — skipping {target}")
-        return None
+        return None, None
     if exc_info[0]:
         raise exc_info[0]
-    return result[0]
+    return result[0], detector.best_version
 
 
 def main():
@@ -1366,45 +1369,65 @@ def main():
         targets.append(args.target)
 
     if len(targets) == 1:
-        detected = scan_target(targets[0], args.timeout, args.user_agent,
-                               args.cve, args.debug, args.max_time)
+        detected, version = scan_target(targets[0], args.timeout, args.user_agent,
+                                        args.cve, args.debug, args.max_time)
         sys.exit(0 if detected else 1)
 
     # Multi-target mode
     print(f"\n[*] Scanning {len(targets)} targets"
           f" (timeout: {args.timeout}s/request, {args.max_time}s/target)...\n")
     results = {"detected": 0, "not_detected": 0, "errors": 0, "timeouts": 0}
+    scan_results = []  # (target, status, version)
 
     for i, target in enumerate(targets, 1):
         print(f"\n{'#'*65}")
         print(f" Target {i}/{len(targets)}: {target}")
         print(f"{'#'*65}")
+        url = target if target.startswith(("http://", "https://")) else f"https://{target}"
         try:
-            detected = scan_target(target, args.timeout, args.user_agent,
-                                   args.cve, args.debug, args.max_time)
+            detected, version = scan_target(target, args.timeout, args.user_agent,
+                                            args.cve, args.debug, args.max_time)
             if detected is None:
                 results["timeouts"] += 1
+                scan_results.append((url, "TIMEOUT", None))
             elif detected:
                 results["detected"] += 1
+                scan_results.append((url, "DETECTED", version))
             else:
                 results["not_detected"] += 1
+                scan_results.append((url, "NOT CITRIX", None))
         except KeyboardInterrupt:
             print("\n[!] Interrupted by user")
             break
         except Exception as exc:
             print(f"\n[!] Error scanning {target}: {exc}")
             results["errors"] += 1
+            scan_results.append((url, "ERROR", None))
 
     total = results["detected"] + results["not_detected"] + results["errors"] + results["timeouts"]
     print(f"\n{'='*65}")
-    print(f" SCAN COMPLETE")
-    print(f"{'='*65}")
-    print(f"  Targets scanned: {total}")
-    print(f"  Citrix detected: {results['detected']}")
-    print(f"  Not detected:    {results['not_detected']}")
-    print(f"  Timeouts:        {results['timeouts']}")
-    print(f"  Errors:          {results['errors']}")
+    print(f" SCAN COMPLETE — {total} targets")
     print(f"{'='*65}\n")
+
+    # Per-target results table
+    if scan_results:
+        max_url = max(len(r[0]) for r in scan_results)
+        max_url = min(max_url, 50)  # cap column width
+        for url, status, version in scan_results:
+            display_url = url[:50]
+            if version:
+                print(f"  {display_url:<{max_url}}  {version}")
+            elif status == "NOT CITRIX":
+                print(f"  {display_url:<{max_url}}  Not Citrix")
+            elif status == "TIMEOUT":
+                print(f"  {display_url:<{max_url}}  Timed out")
+            elif status == "ERROR":
+                print(f"  {display_url:<{max_url}}  Error")
+
+    print(f"\n  Citrix detected: {results['detected']}"
+          f" | Not detected: {results['not_detected']}"
+          f" | Timeouts: {results['timeouts']}"
+          f" | Errors: {results['errors']}\n")
 
 
 if __name__ == "__main__":
