@@ -9,6 +9,7 @@ This repository contains triage and fingerprinting scripts for Citrix NetScaler 
 | Script | Description |
 |--------|-------------|
 | `citrix_detect.py` | **BLS** - Comprehensive version detection using 12 techniques with CVE assessment |
+| `citrix_version_correlator.py` | **BLS** - Identify unknown fingerprints using public release dates (no Citrix account needed) |
 | `scan-citrix-netscaler-version.py` | Fox-IT - Mass version scanner via GZIP timestamp fingerprinting |
 | `iocitrix.py` | Fox-IT - Dissect-based IOC checker for forensic disk images |
 | `extract-Stamp-From-TgzFile.py` | Fox-IT - Extract fingerprints from Citrix firmware .tgz packages |
@@ -154,16 +155,80 @@ nuclei -t nuclei-templates/ -l targets.txt
 
 ---
 
+# citrix_version_correlator.py
+
+Identifies unknown GZIP timestamps by correlating build dates with publicly available release dates from docs.netscaler.com and citrix.com/downloads. No Citrix account required.
+
+Contains **188 version-to-release-date mappings** across all branches (14.1, 13.1, 13.0, 12.1, 11.1 + FIPS variants).
+
+## How It Works
+
+Citrix firmware is compiled days before its public GA release. The GZIP timestamp in `rdx_en.json.gz` reflects the compile date. By cross-referencing against known release dates, the tool narrows an unknown timestamp to 2-3 candidate versions.
+
+## Usage
+
+```shell
+# Show compile-to-release offset statistics per branch
+python3 citrix_version_correlator.py --stats
+
+# Identify an unknown GZIP timestamp
+python3 citrix_version_correlator.py --stamp 1768297927
+
+# Scan a target and predict its version
+python3 citrix_version_correlator.py --scan https://vpn.example.com
+
+# Export merged database as CSV
+python3 citrix_version_correlator.py --export
+```
+
+### Example Output
+
+```
+=================================================================
+ Identifying timestamp 1768297927
+ Build date: 2026-01-13 09:52:07 UTC
+=================================================================
+
+  Top candidates (by compile-to-release offset fit):
+
+  #    Version          Branch       Release Date    Days Before
+  ------------------------------------------------------------
+  1    13.1-37.259      13.1-FIPS    2026-01-22            8.6d
+  2    14.1-60.57       14.1         2026-01-20            6.6d
+  3    13.1-61.26       13.1         2026-01-20            6.6d
+
+  Best guess: 13.1-37.259 (released 2026-01-22)
+```
+
+Combined with other signals from `citrix_detect.py` (e.g., `Via: NS-CACHE` header, EPA plugin version, FIPS-specific endpoints), you can determine the exact version from the candidate list.
+
+---
+
 # Adding New Fingerprints
 
-When `citrix_detect.py` reports a GZIP timestamp not in the database, you can add it:
+When `citrix_detect.py` reports a GZIP timestamp not in the database, you can identify it and add it:
 
-1. Note the timestamp and vhash from the scan output
-2. Add an entry to `custom-fingerprints.csv` with the source and notes
-3. Add the CSV line to the embedded database in `scan-citrix-netscaler-version.py` (line ~47)
-4. Once the version is identified (via Citrix release notes or firmware analysis), update `unknown` to the real version string
+### Step 1: Identify the version
 
-The `extract-Stamp-From-TgzFile.py` utility can also extract fingerprints directly from official Citrix firmware `.tgz` packages downloaded from support.citrix.com.
+Use one of these methods (no Citrix account required for the first two):
+
+| Method | Requires Account? | How |
+|--------|-------------------|-----|
+| **Version correlator** | No | `python3 citrix_version_correlator.py --stamp <TIMESTAMP>` — narrows to 2-3 candidates using public release dates |
+| **Release notes / forums** | No | Cross-reference build date against [docs.netscaler.com](https://docs.netscaler.com) release notes or Citrix Community forum posts |
+| **Firmware extraction** | Yes (free account) | Download `.tgz` from support.citrix.com, run `python3 extract-Stamp-From-TgzFile.py <file.tgz>` |
+| **Known running instance** | Admin access | Run `show ns version` on the CLI, then scan it to capture the fingerprint |
+
+### Step 2: Add to the database
+
+1. Add an entry to `custom-fingerprints.csv` with the source and notes
+2. Add the CSV line to the embedded database in `scan-citrix-netscaler-version.py` (line ~47)
+3. Add the CSV line to the embedded database in `citrix_detect.py`
+4. Add the stamp to the Nuclei templates in `nuclei-templates/`
+
+### Step 3: Update release date DB (optional)
+
+If this is a newly released version not yet in the correlator, add it to the `RELEASE_DATES_CSV` in `citrix_version_correlator.py` so future correlations are more accurate.
 
 ---
 
