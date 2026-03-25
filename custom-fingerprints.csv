@@ -1,2 +1,4 @@
 rdx_en_date,rdx_en_stamp,vhash,version,source,notes
 2026-01-13 09:52:07+00:00,1768297927,914e500e5a4fc7bab9e75f7a2b43e8d8,13.1-61.26,ctx.motion.com,Identified via Citrix Community forum: compile date Jan 13 2026 13:16:05 = 13.1-61.26. GA release Jan 20 2026. EPA plugin v25.5.1.15. Via NS-CACHE-10.0.
+2026-03-08 07:04:52+00:00,1772953492,4d5e0082bbdcfce8a3a9c4143ef24073,13.1-37.262,firmware extraction,Extracted from build-13.1-37.262_nc_64.tgz. FIPS/NDcPP build. GA release Mar 23 2026.
+0,0,95e727204d03c6e3eff75fe4e705c025,,firmware extraction,GZIP MTIME zeroed in builds 13.1-62.23 + 14.1-60.58 + 14.1-66.59. Citrix removed timestamp from rdx_en.json.gz. VPN file is 23 bytes. Shared MD5 across all three — NOT usable for version differentiation.
