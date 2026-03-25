@@ -29,9 +29,11 @@ For authorized security assessments only.
 import argparse
 import hashlib
 import re
+import signal
 import ssl
 import struct
 import sys
+import threading
 import urllib3
 from collections import OrderedDict, namedtuple
 from datetime import datetime, timezone
@@ -1252,16 +1254,45 @@ class CitrixDetector:
 # MAIN
 # ═══════════════════════════════════════════════════════════════════════════
 
+class ScanTimeout(Exception):
+    pass
+
+
 def scan_target(target: str, timeout: int, user_agent: str | None,
-                check_cves: bool, debug: bool = False) -> bool:
-    """Scan a single target. Returns True if Citrix detected."""
+                check_cves: bool, debug: bool = False,
+                max_time: int = 0) -> bool | None:
+    """Scan a single target. Returns True/False, or None on timeout."""
     if not target.startswith(("http://", "https://")):
         target = f"https://{target}"
 
     detector = CitrixDetector(target, timeout=timeout, user_agent=user_agent,
                               check_cves=check_cves, debug=debug)
-    detector.scan()
-    return detector.is_citrix
+
+    if max_time <= 0:
+        detector.scan()
+        return detector.is_citrix
+
+    # Run scan in a thread with a deadline
+    result = [None]  # mutable container for thread result
+    exc_info = [None]
+
+    def _run():
+        try:
+            detector.scan()
+            result[0] = detector.is_citrix
+        except Exception as e:
+            exc_info[0] = e
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout=max_time)
+
+    if t.is_alive():
+        print(f"  [!] Timed out after {max_time}s — skipping {target}")
+        return None
+    if exc_info[0]:
+        raise exc_info[0]
+    return result[0]
 
 
 def main():
@@ -1284,6 +1315,8 @@ def main():
                         help="Run CVE vulnerability assessment against detected version")
     parser.add_argument("-d", "--debug", action="store_true",
                         help="Show verbose phase-by-phase output and detailed findings")
+    parser.add_argument("--max-time", type=int, default=120,
+                        help="Max seconds per target before skipping (default: 120, 0=unlimited)")
     args = parser.parse_args()
 
     if not args.target and not args.file:
@@ -1309,20 +1342,25 @@ def main():
         targets.append(args.target)
 
     if len(targets) == 1:
-        detected = scan_target(targets[0], args.timeout, args.user_agent, args.cve, args.debug)
+        detected = scan_target(targets[0], args.timeout, args.user_agent,
+                               args.cve, args.debug, args.max_time)
         sys.exit(0 if detected else 1)
 
     # Multi-target mode
-    print(f"\n[*] Scanning {len(targets)} targets...\n")
-    results = {"detected": 0, "not_detected": 0, "errors": 0}
+    print(f"\n[*] Scanning {len(targets)} targets"
+          f" (timeout: {args.timeout}s/request, {args.max_time}s/target)...\n")
+    results = {"detected": 0, "not_detected": 0, "errors": 0, "timeouts": 0}
 
     for i, target in enumerate(targets, 1):
         print(f"\n{'#'*65}")
         print(f" Target {i}/{len(targets)}: {target}")
         print(f"{'#'*65}")
         try:
-            detected = scan_target(target, args.timeout, args.user_agent, args.cve)
-            if detected:
+            detected = scan_target(target, args.timeout, args.user_agent,
+                                   args.cve, args.debug, args.max_time)
+            if detected is None:
+                results["timeouts"] += 1
+            elif detected:
                 results["detected"] += 1
             else:
                 results["not_detected"] += 1
@@ -1333,12 +1371,14 @@ def main():
             print(f"\n[!] Error scanning {target}: {exc}")
             results["errors"] += 1
 
+    total = results["detected"] + results["not_detected"] + results["errors"] + results["timeouts"]
     print(f"\n{'='*65}")
     print(f" SCAN COMPLETE")
     print(f"{'='*65}")
-    print(f"  Targets scanned: {results['detected'] + results['not_detected'] + results['errors']}")
+    print(f"  Targets scanned: {total}")
     print(f"  Citrix detected: {results['detected']}")
     print(f"  Not detected:    {results['not_detected']}")
+    print(f"  Timeouts:        {results['timeouts']}")
     print(f"  Errors:          {results['errors']}")
     print(f"{'='*65}\n")
 
