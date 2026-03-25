@@ -1247,6 +1247,17 @@ class CitrixDetector:
 # MAIN
 # ═══════════════════════════════════════════════════════════════════════════
 
+def scan_target(target: str, timeout: int, user_agent: str | None, check_cves: bool) -> bool:
+    """Scan a single target. Returns True if Citrix detected."""
+    if not target.startswith(("http://", "https://")):
+        target = f"https://{target}"
+
+    detector = CitrixDetector(target, timeout=timeout, user_agent=user_agent,
+                              check_cves=check_cves)
+    detector.scan()
+    return detector.is_citrix
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=(
@@ -1255,7 +1266,10 @@ def main():
         ),
         epilog="For authorized security assessments only.",
     )
-    parser.add_argument("target", help="Target URL (e.g. https://vpn.example.com)")
+    parser.add_argument("target", nargs="?", default=None,
+                        help="Target URL (e.g. https://vpn.example.com)")
+    parser.add_argument("-f", "--file", default=None,
+                        help="File containing target URLs/IPs, one per line")
     parser.add_argument("-t", "--timeout", type=int, default=10,
                         help="HTTP request timeout in seconds (default: 10)")
     parser.add_argument("-a", "--user-agent", default=None,
@@ -1264,15 +1278,61 @@ def main():
                         help="Run CVE vulnerability assessment against detected version")
     args = parser.parse_args()
 
-    target = args.target
-    if not target.startswith(("http://", "https://")):
-        target = f"https://{target}"
+    if not args.target and not args.file:
+        parser.error("either a target URL or -f/--file is required")
 
-    detector = CitrixDetector(target, timeout=args.timeout, user_agent=args.user_agent,
-                              check_cves=args.cve)
-    detector.scan()
+    targets = []
 
-    sys.exit(0 if detector.is_citrix else 1)
+    if args.file:
+        try:
+            with open(args.file) as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        targets.append(line)
+        except FileNotFoundError:
+            print(f"[!] File not found: {args.file}")
+            sys.exit(1)
+        if not targets:
+            print(f"[!] No targets found in {args.file}")
+            sys.exit(1)
+
+    if args.target:
+        targets.append(args.target)
+
+    if len(targets) == 1:
+        detected = scan_target(targets[0], args.timeout, args.user_agent, args.cve)
+        sys.exit(0 if detected else 1)
+
+    # Multi-target mode
+    print(f"\n[*] Scanning {len(targets)} targets...\n")
+    results = {"detected": 0, "not_detected": 0, "errors": 0}
+
+    for i, target in enumerate(targets, 1):
+        print(f"\n{'#'*65}")
+        print(f" Target {i}/{len(targets)}: {target}")
+        print(f"{'#'*65}")
+        try:
+            detected = scan_target(target, args.timeout, args.user_agent, args.cve)
+            if detected:
+                results["detected"] += 1
+            else:
+                results["not_detected"] += 1
+        except KeyboardInterrupt:
+            print("\n[!] Interrupted by user")
+            break
+        except Exception as exc:
+            print(f"\n[!] Error scanning {target}: {exc}")
+            results["errors"] += 1
+
+    print(f"\n{'='*65}")
+    print(f" SCAN COMPLETE")
+    print(f"{'='*65}")
+    print(f"  Targets scanned: {results['detected'] + results['not_detected'] + results['errors']}")
+    print(f"  Citrix detected: {results['detected']}")
+    print(f"  Not detected:    {results['not_detected']}")
+    print(f"  Errors:          {results['errors']}")
+    print(f"{'='*65}\n")
 
 
 if __name__ == "__main__":
